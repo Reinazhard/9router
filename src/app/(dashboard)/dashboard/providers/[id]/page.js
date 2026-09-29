@@ -1604,7 +1604,8 @@ export default function ProviderDetailPage() {
                   <p className="text-sm text-text-muted">No connections yet</p>
                   {hasDualAuthModes && (
                     <p className="text-xs text-text-muted">
-                      Choose {oauthConnectionLabel} or {apiKeyConnectionLabel}.
+                      Choose {oauthConnectionLabel}, {apiKeyConnectionLabel}
+                      {hasTripleAuthModes ? ", or Auth Token" : ""}.
                     </p>
                   )}
                 </div>
