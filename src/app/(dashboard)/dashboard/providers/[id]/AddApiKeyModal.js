@@ -171,6 +171,10 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             provider,
             apiKey: entry.apiKey,
             name: entry.name,
+            // Preserve the auth method this modal was opened with; the backend
+            // defaults to "apikey", so bulk rows added via the "Auth Token" flow
+            // would otherwise be mislabeled as API keys.
+            authType: pendingAuthType || undefined,
             priority: 1,
             testStatus: isValid ? "active" : "unknown",
             ...(entry.providerSpecificData ? { providerSpecificData: entry.providerSpecificData } : {}),
