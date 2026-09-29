@@ -1616,11 +1616,11 @@ export default function ProviderDetailPage() {
                     <Button size="sm" icon="lock" variant="secondary" onClick={triggerOAuthConnection}>
                       {oauthConnectionLabel}
                     </Button>
-                    <Button size="sm" icon="key" variant="secondary" onClick={triggerApiKeyConnection}>
+                    <Button size="sm" icon="key" variant="primary" onClick={triggerApiKeyConnection}>
                       {apiKeyConnectionLabel}
                     </Button>
                     {hasTripleAuthModes && (
-                      <Button size="sm" icon="token" onClick={triggerAuthTokenConnection}>
+                      <Button size="sm" icon="token" variant="secondary" onClick={triggerAuthTokenConnection}>
                         Auth Token
                       </Button>
                     )}
@@ -1737,7 +1737,7 @@ export default function ProviderDetailPage() {
                       <Button
                         size="sm"
                         icon="key"
-                        variant="secondary"
+                        variant="primary"
                         onClick={triggerApiKeyConnection}
                         className="w-full sm:w-auto"
                       >
@@ -1747,6 +1747,7 @@ export default function ProviderDetailPage() {
                         <Button
                           size="sm"
                           icon="token"
+                          variant="secondary"
                           onClick={triggerAuthTokenConnection}
                           className="w-full sm:w-auto"
                         >
