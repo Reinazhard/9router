@@ -49,6 +49,7 @@ export default function ProviderDetailPage() {
   const [showXiaomiMimoModal, setShowXiaomiMimoModal] = useState(false);
   const [showIFlowCookieModal, setShowIFlowCookieModal] = useState(false);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
+  const [pendingAuthType, setPendingAuthType] = useState("apikey");
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
@@ -117,6 +118,13 @@ export default function ProviderDetailPage() {
 
   const triggerApiKeyConnection = () => {
     setAddConnectionError("");
+    setPendingAuthType("apikey");
+    setShowAddApiKeyModal(true);
+  };
+
+  const triggerAuthTokenConnection = () => {
+    setAddConnectionError("");
+    setPendingAuthType("auth_token");
     setShowAddApiKeyModal(true);
   };
 
@@ -154,6 +162,7 @@ export default function ProviderDetailPage() {
   const authModes = providerInfo?.authModes || [];
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
+  const supportsAuthTokenAuth = authModes.includes("auth_token");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
   const staticModels = getModelsByProviderId(providerId);
   const models = (providerId === "cursor" || providerId === "zed") && liveModels.length > 0
@@ -165,6 +174,7 @@ export default function ProviderDetailPage() {
   const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
   const isCompatible = isOpenAICompatible || isAnthropicCompatible;
   const hasDualAuthModes = !isCompatible && isOAuth && supportsApiKeyAuth;
+  const hasTripleAuthModes = hasDualAuthModes && supportsAuthTokenAuth;
   const oauthConnectionLabel =
     providerId === "xai" ? "Grok Build OAuth"
     : providerId === "grok-cli" ? "Grok CLI Device Login"
@@ -1605,9 +1615,14 @@ export default function ProviderDetailPage() {
                     <Button size="sm" icon="lock" variant="secondary" onClick={triggerOAuthConnection}>
                       {oauthConnectionLabel}
                     </Button>
-                    <Button size="sm" icon="key" onClick={triggerApiKeyConnection}>
+                    <Button size="sm" icon="key" variant="secondary" onClick={triggerApiKeyConnection}>
                       {apiKeyConnectionLabel}
                     </Button>
+                    {hasTripleAuthModes && (
+                      <Button size="sm" icon="token" onClick={triggerAuthTokenConnection}>
+                        Auth Token
+                      </Button>
+                    )}
                   </>
                 ) : (
                   <>
@@ -1721,11 +1736,22 @@ export default function ProviderDetailPage() {
                       <Button
                         size="sm"
                         icon="key"
+                        variant="secondary"
                         onClick={triggerApiKeyConnection}
                         className="w-full sm:w-auto"
                       >
                         {apiKeyConnectionLabel}
                       </Button>
+                      {hasTripleAuthModes && (
+                        <Button
+                          size="sm"
+                          icon="token"
+                          onClick={triggerAuthTokenConnection}
+                          className="w-full sm:w-auto"
+                        >
+                          Auth Token
+                        </Button>
+                      )}
                     </>
                   ) : (
                     <Button
@@ -1884,6 +1910,7 @@ export default function ProviderDetailPage() {
         isCompatible={isCompatible}
         isAnthropic={isAnthropicCompatible}
         authType={providerInfo?.authType}
+        pendingAuthType={pendingAuthType}
         authHint={providerInfo?.authHint}
         website={providerInfo?.website}
         proxyPools={proxyPools}
@@ -1893,6 +1920,7 @@ export default function ProviderDetailPage() {
         onBulkDone={fetchConnections}
         onClose={() => {
           setAddConnectionError("");
+          setPendingAuthType("apikey");
           setShowAddApiKeyModal(false);
         }}
       />
