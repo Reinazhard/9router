@@ -66,8 +66,15 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-cn", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
   { provider: "codebuddy-cn", pattern: "hy3*",         levels: ["low", "high"] },
   { provider: "codebuddy-cn", pattern: "hy4*",         levels: ["high"] },
-  // codebuddy-intl rides the same gateway catalog, so its deepseek levels match.
+  // codebuddy-intl rides the same gateway catalog, so the models it shares with
+  // CN carry the same supportedEfforts. Mirror CN's sets for the shared ids;
+  // Intl-only models (gpt-5.x / gpt-6-astra / gemini-3.5-flash / kimi-k3) have
+  // no published supportedEfforts here and fall through to the format default.
+  { provider: "codebuddy-intl", pattern: "glm-5.3*",     levels: ["low", "high", "max"] },
+  { provider: "codebuddy-intl", pattern: "glm-5.2",      levels: ["high", "xhigh"] },
   { provider: "codebuddy-intl", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
+  { provider: "codebuddy-intl", pattern: "hy3*",         levels: ["low", "high"] },
+  { provider: "codebuddy-intl", pattern: "hy4*",         levels: ["high"] },
 ];
 
 // Returns valid thinking levels for a model, or null when the model has no reasoning.

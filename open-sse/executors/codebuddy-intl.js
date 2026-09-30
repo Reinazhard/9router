@@ -24,18 +24,30 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
       transformed.reasoning_summary = "auto";
     }
 
-    // CodeBuddy rejects plain OpenAI shape (11101 invalid request): needs a
-    // leading system prompt + user content as typed blocks, not a bare string.
+    // CodeBuddy rejects plain OpenAI shape (11101 invalid request) and requires
+    // the first message to be a system prompt — otherwise it answers 400
+    // 11128 "first message is not system prompt". Probed against the live
+    // gateway: caller system prompts are accepted and preserved, bare-string
+    // user content is accepted, but a "developer" role is rejected outright
+    // (11128 "Illegal API invocation from an unapproved channel"), so only
+    // developer messages are dropped.
+    //
+    // Earlier this rebuilt the array from scratch with a hardcoded system
+    // prompt, which silently discarded every caller system prompt. Preserve
+    // them instead: inject the default only when the caller did not already
+    // lead with one.
+    const DEFAULT_SYSTEM_PROMPT = "You are CodeBuddy Code.";
     const source = Array.isArray(transformed.messages) ? transformed.messages : [];
-    transformed.messages = [{ role: "system", content: "You are CodeBuddy Code." }];
-    for (const message of source) {
-      if (!message || typeof message !== "object" || ["system", "developer"].includes(message.role)) continue;
-      if (message.role === "user" && typeof message.content === "string") {
-        transformed.messages.push({ ...message, content: [{ type: "text", text: message.content }] });
-      } else {
-        transformed.messages.push({ ...message });
-      }
+
+    const messages = source.filter(
+      (m) => m && typeof m === "object" && m.role !== "developer",
+    );
+    // The gateway requires a leading system message; a developer message may
+    // have been the caller's only instruction, so fall back to the default.
+    if (!messages.some((m) => m && m.role === "system")) {
+      messages.unshift({ role: "system", content: DEFAULT_SYSTEM_PROMPT });
     }
+    transformed.messages = messages;
 
     return transformed;
   }
