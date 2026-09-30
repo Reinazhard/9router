@@ -75,6 +75,11 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-intl", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
   { provider: "codebuddy-intl", pattern: "hy3*",         levels: ["low", "high"] },
   { provider: "codebuddy-intl", pattern: "hy4*",         levels: ["high"] },
+  // Intl-only ids that speak the gateway's OpenAI reasoning_effort shape.
+  // kimi-k3 honors "max"; gemini-3.5-flash is an openai-effort model too (the
+  // old "kimi"/"gemini-level" caps routed it to the wrong wire format).
+  { provider: "codebuddy-intl", pattern: "kimi-k3",          levels: ["low", "medium", "high", "max"] },
+  { provider: "codebuddy-intl", pattern: "gemini-3.5-flash", levels: ["low", "medium", "high"] },
 ];
 
 // Returns valid thinking levels for a model, or null when the model has no reasoning.

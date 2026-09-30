@@ -489,6 +489,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     })).catch(() => { });
 
     const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
+    const overflow = detectContextOverflow(statusCode, message, provider, model);
+    if (overflow) {
+      log?.errorLine?.(reqTag, "✗",
+        `CONTEXT_OVERFLOW ${provider}/${model} · contextWindow=${overflow.contextWindow} · maxOutput=${overflow.maxOutput} · the request exceeded the model's window (no trim/compaction is applied by the gateway)`);
+    }
     if (log?.errorLine) {
       const urlStr = providerUrl ? `\n    URL: ${providerUrl}` : "";
       log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
@@ -522,4 +527,25 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {
   if (!expiresAt) return false;
   return new Date(expiresAt).getTime() - Date.now() < bufferMs;
+}
+
+// Context-overflow detection. A 400 whose text names a length/context/token
+// limit is not a credential problem, and the operator needs to see WHICH window
+// was exceeded — the resolved contextWindow for that provider/model — to tell a
+// genuinely-oversized request from a mis-advertised model capability.
+const CONTEXT_OVERFLOW_RE =
+  /context.{0,20}(length|window|limit|exceed)|maximum context|too many tokens|token.{0,10}(limit|exceed)|exceeds? the maximum|request too large|input.{0,10}too long/i;
+
+export function detectContextOverflow(status, errorText, provider, model) {
+  if (status !== 400 && status !== 413 && status !== 422) return null;
+  const text = typeof errorText === "string" ? errorText : JSON.stringify(errorText || "");
+  if (!CONTEXT_OVERFLOW_RE.test(text)) return null;
+  const caps = getCapabilitiesForModel(provider, model);
+  return {
+    isContextOverflow: true,
+    provider,
+    model,
+    contextWindow: caps?.contextWindow ?? null,
+    maxOutput: caps?.maxOutput ?? null,
+  };
 }

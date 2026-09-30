@@ -1,5 +1,5 @@
 import { DefaultExecutor } from "./default.js";
-import { sanitiseSystemMessage } from "./codebuddySanitise.js";
+import { sanitiseSystemMessage, NEUTRAL_PROMPT } from "./codebuddySanitise.js";
 
 /**
  * CodeBuddyIntlExecutor — talks to https://www.codebuddy.ai/v2/chat/completions
@@ -40,9 +40,7 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
     //
     // Earlier this rebuilt the array from scratch with a hardcoded system
     // prompt, which silently discarded every caller system prompt. Preserve
-    // them instead: inject the default only when the caller did not already
-    // lead with one.
-    const DEFAULT_SYSTEM_PROMPT = "You are CodeBuddy Code.";
+    // them instead.
     const source = Array.isArray(transformed.messages) ? transformed.messages : [];
 
     // Drop developer-role messages (gateway rejects them outright), then
@@ -52,9 +50,11 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
       .map(sanitiseSystemMessage);
 
     // The gateway requires a leading system message; a developer message may
-    // have been the caller's only instruction, so fall back to the default.
+    // have been the caller's only instruction, so fall back to a neutral prompt
+    // (never a branded identity — the caller's own system prompt is preserved
+    // above, and this default must not assert a different agent).
     if (!messages.some((m) => m && m.role === "system")) {
-      messages.unshift({ role: "system", content: DEFAULT_SYSTEM_PROMPT });
+      messages.unshift({ role: "system", content: NEUTRAL_PROMPT });
     }
     transformed.messages = messages;
 

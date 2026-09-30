@@ -276,8 +276,10 @@ export const PROVIDER_CAPABILITIES = {
   // otherwise resolved them to different numbers (it gave glm-5.3 vision:false
   // while CN declares vision:true for the same upstream model).
   // Intl-only models (gpt-5.x / gpt-6-astra / gemini-3.5-flash / kimi-k3) are
-  // deliberately absent: they resolve sensibly through the generic patterns and
-  // there is no verified per-model source to override them with.
+  // declared explicitly where the generic pattern would resolve the WRONG
+  // thinking format or window: gemini-3.5-flash and kimi-k3 matched the generic
+  // *gemini*/*kimi* patterns (thinkingFormat "gemini-level"/"kimi"), but the
+  // CodeBuddy gateway speaks only the unified OpenAI reasoning_effort shape.
   "codebuddy-intl": {
     "hy3":                { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 192000, maxOutput: 64000 },
     "hy4-preview":        { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 64000 },
@@ -287,6 +289,10 @@ export const PROVIDER_CAPABILITIES = {
     "kimi-k2.6":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
     "kimi-k2.8-preview":  { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
     "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+    // Intl-only ids — pin the gateway's OpenAI reasoning shape so a generic
+    // pattern cannot re-route thinking for this provider.
+    "gemini-3.5-flash":   { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 65536 },
+    "kimi-k3":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 32000 },
   },
   // Poolside Laguna — OpenAI-compatible, all reasoning-capable (32K max output).
   "poolside": {
