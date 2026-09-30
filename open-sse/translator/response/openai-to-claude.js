@@ -3,6 +3,7 @@ import { FORMATS } from "../formats.js";
 import { ROLE, CLAUDE_BLOCK, MODEL_FALLBACK } from "../schema/index.js";
 import { fromOpenAIFinish } from "../concerns/finishReason.js";
 import { extractReasoningText } from "../concerns/reasoning.js";
+import { fallbackToolCallId } from "../concerns/toolCall.js";
 
 // Legacy "proxy_" prefix used by older request translators. Response strips it
 // defensively so tool names from such turns resolve back (e.g. proxy_Read → Read
@@ -65,6 +66,65 @@ function stopTextBlock(state, results) {
     index: state.textBlockIndex
   });
   state.textBlockStarted = false;
+}
+
+// Helper: close every still-open tool_use block (buffered args + stop).
+// A tool-call block is opened on the first delta fragment and — because args
+// are buffered until finish — can stay open across many chunks. If the next
+// semantic event is text/thinking (or a second, distinct tool call), the open
+// block must be flushed first, otherwise its input_json_delta is emitted after
+// an unrelated later block (Claude Code then associates the args with the
+// wrong block). Returns true if anything was closed so the caller can avoid
+// re-emitting on finish.
+function stopToolBlocks(state, results) {
+  if (!state.toolCalls || state.toolCalls.size === 0) return false;
+  let closed = false;
+  for (const [idx, toolInfo] of state.toolCalls) {
+    if (toolInfo.closed) continue;
+    emitToolArgsAndStop(state, idx, toolInfo, results);
+    closed = true;
+  }
+  return closed;
+}
+
+// Emit a tool call's buffered (sanitized) args as one input_json_delta, then
+// close the block. Idempotent per index so a flush followed by the finish
+// branch cannot double-emit.
+function emitToolArgsAndStop(state, idx, toolInfo, results) {
+  if (toolInfo.closed) return;
+  toolInfo.closed = true;
+  const buffered = state.toolArgBuffers?.get(idx);
+  if (buffered) {
+    const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
+    results.push({
+      type: "content_block_delta",
+      index: toolInfo.blockIndex,
+      delta: { type: "input_json_delta", partial_json: sanitized }
+    });
+  }
+  results.push({
+    type: "content_block_stop",
+    index: toolInfo.blockIndex
+  });
+}
+
+// Resolve the grouping index for a tool_call delta. `index` is optional in the
+// OpenAI streaming schema; when the upstream omits it, defaulting every call to
+// 0 collapses distinct parallel tool calls into one block. Prefer the provider
+// index, else key by id, else allocate a fresh synthetic index per chunk that
+// carries a new id/name with no index.
+function resolveToolIndex(state, tc) {
+  if (typeof tc.index === "number") return tc.index;
+  if (tc.id && state.toolIndexById?.has(tc.id)) return state.toolIndexById.get(tc.id);
+  if (tc.id) {
+    const synth = state.syntheticToolIndex ?? 0;
+    state.syntheticToolIndex = synth + 1;
+    if (!state.toolIndexById) state.toolIndexById = new Map();
+    state.toolIndexById.set(tc.id, synth);
+    return synth;
+  }
+  // No index, no id: attribute to the most recently opened block if any, else 0.
+  return state.lastToolIndex ?? 0;
 }
 
 // Convert OpenAI stream chunk to Claude format
@@ -139,6 +199,9 @@ export function openaiToClaudeResponse(chunk, state) {
   const reasoningContent = extractReasoningText(delta);
   if (reasoningContent) {
     stopTextBlock(state, results);
+    // A buffered tool call may still be open; flush it before an unrelated
+    // block starts so its args stay attributed to the right tool_use.
+    stopToolBlocks(state, results);
 
     if (!state.thinkingBlockStarted) {
       state.thinkingBlockIndex = state.nextBlockIndex++;
@@ -160,6 +223,8 @@ export function openaiToClaudeResponse(chunk, state) {
   // Handle regular content
   if (delta?.content) {
     stopThinkingBlock(state, results);
+    // Flush any open tool call before text starts (see stopToolBlocks).
+    stopToolBlocks(state, results);
 
     if (!state.textBlockStarted) {
       state.textBlockIndex = state.nextBlockIndex++;
@@ -182,15 +247,21 @@ export function openaiToClaudeResponse(chunk, state) {
   // Tool calls
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = tc.index ?? 0;
+      const idx = resolveToolIndex(state, tc);
+      state.lastToolIndex = idx;
 
-      // GLM/fireworks repeats id+null-name on every arg chunk; open block once per idx
-      if (tc.id && !state.toolCalls.has(idx)) {
+      // Open the block on the first fragment carrying an id OR a name — some
+      // upstreams omit the optional id entirely. A missing id is materialised
+      // so the block is still emitted (Claude Code cannot address a tool_use
+      // without an id, and dropping it silently loses the tool call).
+      const hasIdentity = tc.id || tc.function?.name;
+      if (hasIdentity && !state.toolCalls.has(idx)) {
         stopThinkingBlock(state, results);
         stopTextBlock(state, results);
 
         const toolBlockIndex = state.nextBlockIndex++;
-        state.toolCalls.set(idx, { id: tc.id, name: tc.function?.name || "", blockIndex: toolBlockIndex });
+        const toolId = tc.id || fallbackToolCallId(idx);
+        state.toolCalls.set(idx, { id: toolId, name: tc.function?.name || "", blockIndex: toolBlockIndex });
 
         // Strip prefix from tool name for response
         let toolName = tc.function?.name || "";
@@ -203,7 +274,7 @@ export function openaiToClaudeResponse(chunk, state) {
           index: toolBlockIndex,
           content_block: {
             type: CLAUDE_BLOCK.TOOL_USE,
-            id: tc.id,
+            id: toolId,
             name: toolName,
             input: {}
           }
@@ -221,26 +292,21 @@ export function openaiToClaudeResponse(chunk, state) {
     }
   }
 
-  // Finish
+  // Finish — flush any blocks still open, then emit the terminal pair ONCE.
+  // Two distinct concerns deliberately separated:
+  //   * block flush (thinking/text/tool) must run whenever blocks remain open,
+  //     even if a finish_reason chunk repeats, or a late tool-call's buffered
+  //     args would be stranded (parallel tool calls complete across chunks).
+  //   * the message_delta + message_stop pair must be idempotent — upstreams
+  //     that send finish_reason twice must not finalize the client stream twice.
   if (choice.finish_reason) {
     stopThinkingBlock(state, results);
     stopTextBlock(state, results);
+    stopToolBlocks(state, results);
 
-    for (const [idx, toolInfo] of state.toolCalls) {
-      // Emit buffered + sanitized args as single delta before stop
-      const buffered = state.toolArgBuffers?.get(idx);
-      if (buffered) {
-        const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
-        results.push({
-          type: "content_block_delta",
-          index: toolInfo.blockIndex,
-          delta: { type: "input_json_delta", partial_json: sanitized }
-        });
-      }
-      results.push({
-        type: "content_block_stop",
-        index: toolInfo.blockIndex
-      });
+    if (state.finishReasonSent) {
+      // Blocks may still have emitted frames this pass; return them, else null.
+      return results.length > 0 ? results : null;
     }
 
     // Mark finish for later usage injection in stream.js
@@ -254,6 +320,7 @@ export function openaiToClaudeResponse(chunk, state) {
       usage: finalUsage
     });
     results.push({ type: "message_stop" });
+    state.finishReasonSent = true;
   }
 
   return results.length > 0 ? results : null;
