@@ -100,6 +100,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // back to its declared Claude target).
   const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
+  // Expose the provider id to request translators (they receive `credentials`,
+  // not the provider) so a translator can resolve provider-scoped capabilities
+  // — e.g. the model-aware max_tokens ceiling in claude-to-openai.js.
+  if (credentials) credentials._provider = provider;
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
 
