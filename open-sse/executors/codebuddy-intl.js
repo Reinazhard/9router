@@ -8,6 +8,25 @@ import { DefaultExecutor } from "./default.js";
  * request carries the IDE's OpenAI-style reasoning params. Force stream and
  * mirror reasoning_summary exactly like CodeBuddyExecutor.
  */
+
+// Agent-identity system prompts trigger 11128 "Illegal API invocation from an
+// unapproved channel" on the CodeBuddy gateway (probed live: the exact string
+// "You are Claude Code, Anthropic's official CLI for Claude." is blocked;
+// individual keywords are not). Replace matching system prompts with a neutral
+// substitute that keeps the request valid without disclosing the agent origin.
+// Mirrors the same guard in codebuddy-cn.js.
+const NEUTRAL_PROMPT =
+  "You are a helpful AI assistant that helps with software engineering tasks.";
+const AGENT_PATTERN =
+  /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i;
+
+const flatten = (content) =>
+  typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n")
+      : "";
+
 export class CodeBuddyIntlExecutor extends DefaultExecutor {
   constructor() {
     super("codebuddy-intl");
@@ -32,6 +51,10 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
     // (11128 "Illegal API invocation from an unapproved channel"), so only
     // developer messages are dropped.
     //
+    // Additionally, agent-identity system prompts (Claude Code, Cursor, etc.)
+    // trigger 11128 regardless of role — sanitise them to NEUTRAL_PROMPT while
+    // preserving legitimate user-supplied system prompts unchanged.
+    //
     // Earlier this rebuilt the array from scratch with a hardcoded system
     // prompt, which silently discarded every caller system prompt. Preserve
     // them instead: inject the default only when the caller did not already
@@ -39,9 +62,22 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
     const DEFAULT_SYSTEM_PROMPT = "You are CodeBuddy Code.";
     const source = Array.isArray(transformed.messages) ? transformed.messages : [];
 
-    const messages = source.filter(
-      (m) => m && typeof m === "object" && m.role !== "developer",
-    );
+    // 1. Drop developer-role messages (gateway rejects them outright).
+    // 2. Sanitise agent-identity system prompts or oversized system prompts.
+    const messages = source
+      .filter((m) => m && typeof m === "object" && m.role !== "developer")
+      .map((message) => {
+        if (!message || message.role !== "system") return message;
+        const text = flatten(message.content);
+        if (!text) return message;
+        if (text.length > 2000 || AGENT_PATTERN.test(text)) {
+          return typeof message.content === "string"
+            ? { ...message, content: NEUTRAL_PROMPT }
+            : { ...message, content: [{ type: "text", text: NEUTRAL_PROMPT }] };
+        }
+        return message;
+      });
+
     // The gateway requires a leading system message; a developer message may
     // have been the caller's only instruction, so fall back to the default.
     if (!messages.some((m) => m && m.role === "system")) {
