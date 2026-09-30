@@ -226,6 +226,16 @@ function convertClaudeMessage(msg) {
             resultContent = JSON.stringify(block.content);
           }
 
+          // The OpenAI tool role has no native is_error field, and CodeBuddy
+          // rejects unknown fields on the message. Preserve the error signal —
+          // RTK's compression skips error results, and the model needs to know a
+          // tool failed — by prefixing a marker the downstream can detect.
+          if (block.is_error === true) {
+            resultContent = resultContent
+              ? `[tool_error: true]\n${resultContent}`
+              : "[tool_error: true]";
+          }
+
           toolResults.push({
             role: ROLE.TOOL,
             tool_call_id: block.tool_use_id,

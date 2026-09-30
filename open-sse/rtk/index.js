@@ -54,6 +54,9 @@ export function compressMessages(body, enabled) {
         for (let k = 0; k < msg.content.length; k++) {
           const part = msg.content[k];
           if (part && part.type === "text" && typeof part.text === "string") {
+            // An error result carries the [tool_error: true] marker the Claude->
+            // OpenAI translator prepends; never compress error traces.
+            if (part.text.startsWith("[tool_error: true]")) continue;
             part.text = compressText(part.text, stats, "openai-tool-array");
           }
         }
