@@ -87,6 +87,7 @@ export function createSSEStream(options = {}) {
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
+  let passthroughFinishSeen = false; // passthrough: upstream emitted finish_reason
   let finalized = false;
   let completionFlushTimer = null;
 
@@ -164,6 +165,17 @@ export function createSSEStream(options = {}) {
           let injectedUsage = false;
           let responsesTerminal = false;
 
+          // Track the upstream's own terminators so the flush can avoid
+          // double-emitting [DONE] and can surface a truncated stream instead
+          // of presenting it as a clean success.
+          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]") {
+            streamDoneSent = true;
+            continue;
+          } else if (trimmed === "[DONE]") {
+            streamDoneSent = true;
+            continue;
+          }
+
           if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
             try {
               const parsed = JSON.parse(trimmed.slice(5).trim());
@@ -229,6 +241,7 @@ export function createSSEStream(options = {}) {
               responsesTerminal = isOpenAIResponsesTerminalEvent(currentOpenAIResponsesEvent, parsed);
 
               const isFinishChunk = parsed.choices?.[0]?.finish_reason;
+              if (isFinishChunk) passthroughFinishSeen = true;
               if (isFinishChunk && !hasValidUsage(parsed.usage)) {
                 const estimated = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
                 parsed.usage = filterUsageForFormat(estimated, FORMATS.OPENAI);
@@ -445,10 +458,34 @@ export function createSSEStream(options = {}) {
           // Without it they can hang until timeout and trigger failover.
           // Gemini-family clients (Antigravity, Vertex, Gemini) reject this sentinel with 400 syntax errors.
           const isGeminiFamily = provider === "antigravity" || provider === "gemini" || provider === "vertex";
+
+          // Truncation must not read as a clean success. In passthrough the
+          // upstream's own finish_reason chunk is forwarded verbatim; if the
+          // connection dropped before it arrived, emit a synthetic finishing
+          // chunk (finish_reason "stop", with the accumulated usage) so the
+          // client sees a completed message rather than a silent cut. Skip for
+          // Responses (terminal = response.completed) and Gemini-family clients
+          // (which frame their own termination and reject OpenAI sentinels).
+          const truncated = !passthroughFinishSeen && !keepsOpenAIResponsesFormat && !isGeminiFamily;
+          if (truncated) {
+            const finishChunk = {
+              id: state?.messageId || `chatcmpl-${Date.now()}`,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: state?.model || model || "unknown",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            };
+            if (state?.usage && typeof state.usage === "object") finishChunk.usage = state.usage;
+            const finishOutput = `data: ${JSON.stringify(finishChunk)}\n\n`;
+            reqLogger?.appendConvertedChunk?.(finishOutput);
+            controller.enqueue(sharedEncoder.encode(finishOutput));
+          }
+
           if (!streamDoneSent && !isGeminiFamily) {
             const doneOutput = "data: [DONE]\n\n";
             reqLogger?.appendConvertedChunk?.(doneOutput);
             controller.enqueue(sharedEncoder.encode(doneOutput));
+            streamDoneSent = true;
           }
 
           finalizeStream();

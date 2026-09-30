@@ -94,14 +94,15 @@ function emitToolArgsAndStop(state, idx, toolInfo, results) {
   if (toolInfo.closed) return;
   toolInfo.closed = true;
   const buffered = state.toolArgBuffers?.get(idx);
-  if (buffered) {
-    const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
-    results.push({
-      type: "content_block_delta",
-      index: toolInfo.blockIndex,
-      delta: { type: "input_json_delta", partial_json: sanitized }
-    });
-  }
+  // Emit the accumulated args, or an explicit "{}" when none arrived (a tool
+  // call with no arguments). Always sending one input_json_delta keeps the
+  // block well-formed for clients that expect args to follow content_block_start.
+  const sanitized = buffered ? sanitizeToolArgs(toolInfo.name, buffered) : "{}";
+  results.push({
+    type: "content_block_delta",
+    index: toolInfo.blockIndex,
+    delta: { type: "input_json_delta", partial_json: sanitized }
+  });
   results.push({
     type: "content_block_stop",
     index: toolInfo.blockIndex
@@ -127,9 +128,51 @@ function resolveToolIndex(state, tc) {
   return state.lastToolIndex ?? 0;
 }
 
+// Close every open block and emit the terminal message_delta + message_stop,
+// exactly once. Returns the emitted frames (possibly empty).
+//
+// `stopReason` is the OpenAI finish_reason to translate; when the stream ends
+// with no finish_reason at all (upstream truncation / disconnect) the caller
+// passes null and we synthesize "stop" so the client is never left hanging on
+// an unterminated stream. Idempotent via state.finishReasonSent.
+function finalize(state, results, stopReason) {
+  // Blocks must flush on EVERY finalize call, even after the terminal pair was
+  // already sent — parallel tool calls can complete in chunks that arrive after
+  // a premature finish_reason, and those buffered args must not be stranded.
+  stopThinkingBlock(state, results);
+  stopTextBlock(state, results);
+  stopToolBlocks(state, results);
+
+  if (state.finishReasonSent) return results;
+
+  const reason = stopReason || state.finishReason || "stop";
+  if (!state.finishReason) state.finishReason = reason;
+
+  const finalUsage = state.usage || { input_tokens: 0, output_tokens: 0 };
+  results.push({
+    type: "message_delta",
+    delta: { stop_reason: convertFinishReason(reason) },
+    usage: finalUsage
+  });
+  results.push({ type: "message_stop" });
+  state.finishReasonSent = true;
+  return results;
+}
+
 // Convert OpenAI stream chunk to Claude format
 export function openaiToClaudeResponse(chunk, state) {
-  if (!chunk || !chunk.choices?.[0]) return null;
+  // Flush contract: a null chunk means the upstream stream has ended. If we
+  // opened a message but never saw a finish_reason (provider disconnect,
+  // truncation, or a stream that simply stops), synthesize the terminal pair so
+  // Claude Code's agent loop advances instead of blocking forever. Mirrors the
+  // openaiResponsesToOpenAIResponse flush at openai-responses.js.
+  if (!chunk) {
+    if (!state.messageStartSent || state.finishReasonSent) return null;
+    const out = [];
+    finalize(state, out, null);
+    return out.length > 0 ? out : null;
+  }
+  if (!chunk.choices?.[0]) return null;
 
   const results = [];
   const choice = chunk.choices[0];
@@ -300,27 +343,7 @@ export function openaiToClaudeResponse(chunk, state) {
   //   * the message_delta + message_stop pair must be idempotent — upstreams
   //     that send finish_reason twice must not finalize the client stream twice.
   if (choice.finish_reason) {
-    stopThinkingBlock(state, results);
-    stopTextBlock(state, results);
-    stopToolBlocks(state, results);
-
-    if (state.finishReasonSent) {
-      // Blocks may still have emitted frames this pass; return them, else null.
-      return results.length > 0 ? results : null;
-    }
-
-    // Mark finish for later usage injection in stream.js
-    state.finishReason = choice.finish_reason;
-
-    // Use tracked usage (will be estimated in stream.js if not valid)
-    const finalUsage = state.usage || { input_tokens: 0, output_tokens: 0 };
-    results.push({
-      type: "message_delta",
-      delta: { stop_reason: convertFinishReason(choice.finish_reason) },
-      usage: finalUsage
-    });
-    results.push({ type: "message_stop" });
-    state.finishReasonSent = true;
+    finalize(state, results, choice.finish_reason);
   }
 
   return results.length > 0 ? results : null;
