@@ -77,6 +77,15 @@ export function createSSEStream(options = {}) {
   let totalContentLength = 0;
   let accumulatedContent = "";
   let accumulatedThinking = "";
+  // accumulatedContent/Thinking feed ONLY the request-detail log tail (which is
+  // truncated anyway); the counts used for estimation are totalContentLength.
+  // Cap what we retain so a very long reasoning trace cannot hold megabytes in
+  // memory. Beyond the cap we stop appending (the byte counts stay exact).
+  const RETAIN_CAP = 256 * 1024;
+  // Append while under the cap; stop once reached. Counts are tracked separately
+  // so estimation stays exact even after we stop retaining content.
+  const retainContent = (s) => { if (accumulatedContent.length < RETAIN_CAP) accumulatedContent += s; };
+  const retainThinking = (s) => { if (accumulatedThinking.length < RETAIN_CAP) accumulatedThinking += s; };
   let ttftAt = null;
   let sseLineCount = 0;
   let sseEmittedCount = 0;
@@ -165,15 +174,10 @@ export function createSSEStream(options = {}) {
           let injectedUsage = false;
           let responsesTerminal = false;
 
-          // Track the upstream's own terminators so the flush can avoid
-          // double-emitting [DONE] and can surface a truncated stream instead
-          // of presenting it as a clean success.
-          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]") {
+          // Track the upstream's own terminator so the flush can avoid
+          // double-emitting [DONE]. The line is still forwarded below.
+          if ((trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]") || trimmed === "[DONE]") {
             streamDoneSent = true;
-            continue;
-          } else if (trimmed === "[DONE]") {
-            streamDoneSent = true;
-            continue;
           }
 
           if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
@@ -226,11 +230,11 @@ export function createSSEStream(options = {}) {
               const reasoning = delta?.reasoning_content;
               if (content && typeof content === "string") {
                 totalContentLength += content.length;
-                accumulatedContent += content;
+                retainContent(content);
               }
               if (reasoning && typeof reasoning === "string") {
                 totalContentLength += reasoning.length;
-                accumulatedThinking += reasoning;
+                retainThinking(reasoning);
               }
 
               const extracted = extractUsage(parsed);
@@ -330,23 +334,23 @@ export function createSSEStream(options = {}) {
         // Claude format - content
         if (parsed.delta?.text) {
           totalContentLength += parsed.delta.text.length;
-          accumulatedContent += parsed.delta.text;
+          retainContent(parsed.delta.text);
         }
         // Claude format - thinking
         if (parsed.delta?.thinking) {
           totalContentLength += parsed.delta.thinking.length;
-          accumulatedThinking += parsed.delta.thinking;
+          retainThinking(parsed.delta.thinking);
         }
         
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
-          accumulatedContent += parsed.choices[0].delta.content;
+          retainContent(parsed.choices[0].delta.content);
         }
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
-          accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+          retainThinking(parsed.choices[0].delta.reasoning_content);
         }
         
         // Gemini format
@@ -356,9 +360,9 @@ export function createSSEStream(options = {}) {
               totalContentLength += part.text.length;
               // Check if this is thinking content
               if (part.thought === true) {
-                accumulatedThinking += part.text;
+                retainThinking(part.text);
               } else {
-                accumulatedContent += part.text;
+                retainContent(part.text);
               }
             }
           }
@@ -466,7 +470,10 @@ export function createSSEStream(options = {}) {
           // client sees a completed message rather than a silent cut. Skip for
           // Responses (terminal = response.completed) and Gemini-family clients
           // (which frame their own termination and reject OpenAI sentinels).
-          const truncated = !passthroughFinishSeen && !keepsOpenAIResponsesFormat && !isGeminiFamily;
+          // NOTE: recompute here — `keepsOpenAIResponsesFormat` is declared
+          // inside the per-chunk transform scope, not visible in flush().
+          const flushKeepsResponses = targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.OPENAI_RESPONSES;
+          const truncated = !passthroughFinishSeen && !flushKeepsResponses && !isGeminiFamily;
           if (truncated) {
             const finishChunk = {
               id: state?.messageId || `chatcmpl-${Date.now()}`,
