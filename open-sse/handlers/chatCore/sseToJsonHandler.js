@@ -172,7 +172,9 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
         }
         const existing = toolCallMap.get(idx);
         if (tc.id) existing.id = tc.id;
-        if (tc.function?.name) existing.function.name += tc.function.name;
+        // Assign the name once; some providers repeat it on every arg chunk, and
+        // concatenating would produce "BashBashBash". (Arguments accumulate.)
+        if (tc.function?.name && !existing.function.name) existing.function.name = tc.function.name;
         if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
       }
     }

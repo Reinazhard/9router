@@ -46,7 +46,8 @@ export function openaiToAntigravityResponse(chunk, state) {
       }
       const accum = state._toolCallAccum[idx];
       if (tc.id) accum.id = tc.id;
-      if (tc.function?.name) accum.name += tc.function.name;
+      // Assign once; repeated name chunks would otherwise concatenate.
+      if (tc.function?.name && !accum.name) accum.name = tc.function.name;
       if (tc.function?.arguments) accum.arguments += tc.function.arguments;
     }
     // Skip emit — wait for finish_reason
