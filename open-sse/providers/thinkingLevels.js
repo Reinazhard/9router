@@ -86,9 +86,15 @@ export function getThinkingLevels(provider, model) {
   const modelLevels = provider === "codex"
     ? getProviderModels("cx").find((entry) => entry.id === baseId)?.thinkingLevels
     : null;
-  const hit = PATTERN_THINKING.find((entry) =>
-    (!entry.provider || entry.provider === provider) && matchPattern(entry.pattern, model)
-  );
+  // Specificity wins over array order: a provider-scoped entry always beats a
+  // provider-agnostic one, even if the generic entry appears first. Without
+  // this, a broad rule like `*deepseek-v4.*` above a later
+  // `{provider:"codebuddy-intl", pattern:"deepseek-v4*"}` makes the narrow
+  // entry dead code (find() short-circuits on the first hit).
+  const matches = (entry) =>
+    (!entry.provider || entry.provider === provider) && matchPattern(entry.pattern, model);
+  const hit = PATTERN_THINKING.find((e) => e.provider === provider && matches(e))
+    || PATTERN_THINKING.find(matches);
   let levels = modelLevels || hit?.levels || FORMAT_LEVELS[caps.thinkingFormat] || L.base;
   if (caps.thinkingCanDisable === false) levels = levels.filter((l) => l !== "none");
   return levels;
