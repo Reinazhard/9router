@@ -22,9 +22,8 @@
  * for refill packs, "Bonus Pack N" for bonus packs (soonest-expiring first).
  */
 
-import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { PROVIDERS } from "../../providers/index.js";
-import { U, parseResetTime } from "./shared.js";
+import { U, parseResetTime, fetchWithRetry } from "./shared.js";
 
 const PROVIDER_ID = "codebuddy-cn";
 
@@ -55,7 +54,10 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
   }
 
   try {
-    const response = await proxyAwareFetch(U(providerId).url, {
+    // Retry transient 5xx / network errors: the billing gateway intermittently
+    // 500s, and without a retry a single hiccup surfaces as a hard quota error
+    // even though the credential and request are fine. 4xx is not retried.
+    const response = await fetchWithRetry(U(providerId).url, {
       method: "POST",
       headers: {
         ...(PROVIDERS[providerId]?.headers || {}),
@@ -64,7 +66,7 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
         Accept: "application/json",
       },
       body: "{}",
-    }, proxyOptions);
+    }, { attempts: 3, timeoutMs: 10000, proxyOptions });
 
     if (response.status === 401 || response.status === 403) {
       return { message: `${label} credential invalid or expired.` };
