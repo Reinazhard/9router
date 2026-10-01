@@ -17,43 +17,27 @@ export const COLORS = {
   cyan: "\x1b[36m"
 };
 
-// Buffer tokens to prevent context errors
-const BUFFER_TOKENS = 2000;
-
 // Get HH:MM:SS timestamp
 function getTimeString() {
   return new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 /**
- * Add buffer tokens to usage to prevent context errors
- * @param {object} usage - Usage object (any format)
- * @returns {object} Usage with buffer added
+ * Report usage to the client as-is.
+ *
+ * This used to add a fixed 2000-token "headroom" buffer before returning usage
+ * to the client. That inflated every reported number: a client's context meter
+ * (Claude Code's "% context used") and any cost/usage accounting saw
+ * real_input + 2000, and because the value came from the response body it also
+ * made the reported and recorded usage disagree. The client should see the
+ * provider's real numbers — the estimate path already rounds up on its own, so
+ * no extra margin is needed here.
+ *
+ * Kept as a named pass-through so existing importers and the (format-agnostic)
+ * call sites do not need to change shape.
  */
 export function addBufferToUsage(usage) {
-  if (!usage || typeof usage !== "object") return usage;
-
-  const result = { ...usage };
-
-  // Claude format
-  if (result.input_tokens !== undefined) {
-    result.input_tokens += BUFFER_TOKENS;
-  }
-
-  // OpenAI format
-  if (result.prompt_tokens !== undefined) {
-    result.prompt_tokens += BUFFER_TOKENS;
-  }
-
-  // Calculate or update total_tokens
-  if (result.total_tokens !== undefined) {
-    result.total_tokens += BUFFER_TOKENS;
-  } else if (result.prompt_tokens !== undefined && result.completion_tokens !== undefined) {
-    // Calculate total_tokens if not exists
-    result.total_tokens = result.prompt_tokens + result.completion_tokens;
-  }
-
-  return result;
+  return usage;
 }
 
 export function filterUsageForFormat(usage, targetFormat) {
