@@ -79,9 +79,9 @@ function stopTextBlock(state, results) {
 function stopToolBlocks(state, results) {
   if (!state.toolCalls || state.toolCalls.size === 0) return false;
   let closed = false;
-  for (const [idx, toolInfo] of state.toolCalls) {
+  for (const [key, toolInfo] of state.toolCalls) {
     if (toolInfo.closed) continue;
-    emitToolArgsAndStop(state, idx, toolInfo, results);
+    emitToolArgsAndStop(state, key, toolInfo, results);
     closed = true;
   }
   return closed;
@@ -90,10 +90,10 @@ function stopToolBlocks(state, results) {
 // Emit a tool call's buffered (sanitized) args as one input_json_delta, then
 // close the block. Idempotent per index so a flush followed by the finish
 // branch cannot double-emit.
-function emitToolArgsAndStop(state, idx, toolInfo, results) {
+function emitToolArgsAndStop(state, key, toolInfo, results) {
   if (toolInfo.closed) return;
   toolInfo.closed = true;
-  const buffered = state.toolArgBuffers?.get(idx);
+  const buffered = state.toolArgBuffers?.get(key);
   // Emit the accumulated args, or an explicit "{}" when none arrived (a tool
   // call with no arguments). Always sending one input_json_delta keeps the
   // block well-formed for clients that expect args to follow content_block_start.
@@ -109,23 +109,71 @@ function emitToolArgsAndStop(state, idx, toolInfo, results) {
   });
 }
 
-// Resolve the grouping index for a tool_call delta. `index` is optional in the
-// OpenAI streaming schema; when the upstream omits it, defaulting every call to
-// 0 collapses distinct parallel tool calls into one block. Prefer the provider
-// index, else key by id, else allocate a fresh synthetic index per chunk that
-// carries a new id/name with no index.
-function resolveToolIndex(state, tc) {
-  if (typeof tc.index === "number") return tc.index;
-  if (tc.id && state.toolIndexById?.has(tc.id)) return state.toolIndexById.get(tc.id);
-  if (tc.id) {
-    const synth = state.syntheticToolIndex ?? 0;
-    state.syntheticToolIndex = synth + 1;
+// Resolve the grouping KEY for a tool_call delta, returning a stable internal
+// key (not necessarily the provider's `index`). The OpenAI streaming schema
+// makes `index` optional and lets a provider reuse it, and synthetic keys must
+// not collide with real provider indices — so we key by identity where we can:
+//
+//   1. by id        — the strongest identity; a fragment carrying the same id
+//                     always lands on the same call, even if `index` changes.
+//   2. by index      — bind an index to the id seen with it, so a LATER fragment
+//                     with the same index but a DIFFERENT id starts a NEW call
+//                     instead of being merged into the stale one.
+//   3. synthetic     — no index and no id: namespace these into the negative
+//                     range so they can never collide with a provider index.
+//
+// `state.toolIndexById` : id -> key
+// `state.toolIdByIndex` : raw provider index -> id seen with it
+// `state.toolKeyByIndex`: raw provider index -> internal key
+function resolveToolKey(state, tc) {
+  const hasIndex = typeof tc.index === "number";
+  const id = tc.id || null;
+
+  if (id) {
     if (!state.toolIndexById) state.toolIndexById = new Map();
-    state.toolIndexById.set(tc.id, synth);
-    return synth;
+    const known = state.toolIndexById.get(id);
+    if (known !== undefined) return known;
   }
-  // No index, no id: attribute to the most recently opened block if any, else 0.
-  return state.lastToolIndex ?? 0;
+
+  if (hasIndex) {
+    if (!state.toolKeyByIndex) state.toolKeyByIndex = new Map();
+    if (!state.toolIdByIndex) state.toolIdByIndex = new Map();
+    const boundId = state.toolIdByIndex.get(tc.index);
+    // Same index, but a NEW id => a distinct call that reused the index slot.
+    // Allocate a fresh key AND rebind the index to it, so subsequent
+    // index-only fragments (no id) follow the NEW call rather than the stale
+    // one. The previous call's block is flushed separately by the caller.
+    if (id && boundId && boundId !== id) {
+      const fresh = state.syntheticToolKey ?? -1;
+      state.syntheticToolKey = fresh - 1;
+      state.toolIndexById.set(id, fresh);
+      state.toolIdByIndex.set(tc.index, id);
+      state.toolKeyByIndex.set(tc.index, fresh);
+      return fresh;
+    }
+    if (!state.toolKeyByIndex.has(tc.index)) {
+      // First time we bind this index: keep the provider index as the key.
+      state.toolKeyByIndex.set(tc.index, tc.index);
+    }
+    const key = state.toolKeyByIndex.get(tc.index);
+    if (id) state.toolIdByIndex.set(tc.index, id);
+    return key;
+  }
+
+  if (id) {
+    // No index but a fresh id: allocate a namespaced synthetic key.
+    const fresh = state.syntheticToolKey ?? -1;
+    state.syntheticToolKey = fresh - 1;
+    if (!state.toolIndexById) state.toolIndexById = new Map();
+    state.toolIndexById.set(id, fresh);
+    return fresh;
+  }
+
+  // No index, no id: attribute to the most recently opened call, else allocate.
+  if (state.lastToolKey !== undefined) return state.lastToolKey;
+  const fresh = state.syntheticToolKey ?? -1;
+  state.syntheticToolKey = fresh - 1;
+  return fresh;
 }
 
 // Close every open block and emit the terminal message_delta + message_stop,
@@ -238,8 +286,14 @@ export function openaiToClaudeResponse(chunk, state) {
     });
   }
 
+  // After the terminal pair is emitted, ignore trailing CONTENT/THINKING text:
+  // opening a block now would place it after message_stop and leave it
+  // unterminated. (Late tool ARGUMENTS are still buffered in the tool branch,
+  // which handles only blocks already open.)
+  const terminalSent = state.finishReasonSent === true;
+
   // Handle reasoning (thinking) across vendor shapes - GLM/DeepSeek/Qwen/MiniMax/etc.
-  const reasoningContent = extractReasoningText(delta);
+  const reasoningContent = terminalSent ? null : extractReasoningText(delta);
   if (reasoningContent) {
     stopTextBlock(state, results);
     // A buffered tool call may still be open; flush it before an unrelated
@@ -264,7 +318,7 @@ export function openaiToClaudeResponse(chunk, state) {
   }
 
   // Handle regular content
-  if (delta?.content) {
+  if (delta?.content && !state.finishReasonSent) {
     stopThinkingBlock(state, results);
     // Flush any open tool call before text starts (see stopToolBlocks).
     stopToolBlocks(state, results);
@@ -290,21 +344,42 @@ export function openaiToClaudeResponse(chunk, state) {
   // Tool calls
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = resolveToolIndex(state, tc);
-      state.lastToolIndex = idx;
+      const key = resolveToolKey(state, tc);
+      state.lastToolKey = key;
 
+      const hasIdentity = tc.id || tc.function?.name;
       // Open the block on the first fragment carrying an id OR a name — some
       // upstreams omit the optional id entirely. A missing id is materialised
       // so the block is still emitted (Claude Code cannot address a tool_use
       // without an id, and dropping it silently loses the tool call).
-      const hasIdentity = tc.id || tc.function?.name;
-      if (hasIdentity && !state.toolCalls.has(idx)) {
+      const existing = state.toolCalls.get(key);
+      const needsOpen = !existing || (hasIdentity && tc.id && existing.id !== tc.id && !existing.syntheticId);
+      if (hasIdentity && needsOpen && !state.finishReasonSent) {
+        // If the provider REUSED a provider index for a new id, the previous
+        // call's block is still open under that index as its key. Flush it now
+        // (its args would otherwise be stranded). We flush ONLY a block bound to
+        // the same provider index being reused, never unrelated parallel calls,
+        // so N concurrent tool calls with distinct indices remain untouched.
+        if (typeof tc.index === "number" && key !== tc.index) {
+          const stale = state.toolCalls.get(tc.index);
+          if (stale && !stale.closed) {
+            emitToolArgsAndStop(state, tc.index, stale, results);
+            state.toolArgBuffers?.delete(tc.index);
+            state.toolCalls.delete(tc.index);
+          }
+        }
+        state.toolCalls.delete(key);
         stopThinkingBlock(state, results);
         stopTextBlock(state, results);
 
         const toolBlockIndex = state.nextBlockIndex++;
-        const toolId = tc.id || fallbackToolCallId(idx);
-        state.toolCalls.set(idx, { id: toolId, name: tc.function?.name || "", blockIndex: toolBlockIndex });
+        const toolId = tc.id || fallbackToolCallId(key);
+        state.toolCalls.set(key, {
+          id: toolId,
+          name: tc.function?.name || "",
+          blockIndex: toolBlockIndex,
+          syntheticId: !tc.id,
+        });
 
         // Strip prefix from tool name for response
         let toolName = tc.function?.name || "";
@@ -324,13 +399,17 @@ export function openaiToClaudeResponse(chunk, state) {
         });
       }
 
+      // Buffer args unconditionally, keyed by the resolved key — a fragment can
+      // legitimately arrive BEFORE the id/name fragment (args-first ordering),
+      // and dropping it would truncate the tool input. The block-open path reads
+      // this buffer later.
       if (tc.function?.arguments) {
-        const toolInfo = state.toolCalls.get(idx);
-        if (toolInfo) {
-          // Buffer args instead of streaming — sanitize at finish to fix bad params
-          if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
-          state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
-        }
+        if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
+        state.toolArgBuffers.set(key, (state.toolArgBuffers.get(key) || "") + tc.function.arguments);
+        // If the block is already open, a late name fragment may still be needed;
+        // if the name is still empty, adopt it here.
+        const info = state.toolCalls.get(key);
+        if (info && !info.name && tc.function?.name) info.name = tc.function.name;
       }
     }
   }
