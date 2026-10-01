@@ -14,7 +14,12 @@ import { shouldMarkOneMContext } from "open-sse/utils/modelMarkers.js";
 const execAsync = promisify(exec);
 
 // Env keys that hold a model id Claude Code will resolve through 9Router.
+// ANTHROPIC_MODEL is the primary/default slot (what the dashboard's model
+// picker writes, and what most setups run on); omitting it meant a 1M model
+// mapped there never got the `[1m]` marker and Claude Code assumed a 200K
+// window — reading ~554K real tokens as "100% context used".
 const MODEL_ENV_KEYS = [
+  "ANTHROPIC_MODEL",
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
