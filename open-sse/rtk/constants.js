@@ -58,3 +58,10 @@ export const FILTERS = {
   SEARCH_LIST: "search-list",
   BUILD_OUTPUT: "build-output"
 };
+
+// Machine-detectable truncation sentinel. Any filter that drops entries must
+// append this so a downstream agent can tell data is missing — a bare "+N"
+// reads like a harmless summary. Single source of truth for the format.
+export function truncationSentinel(filter, omitted, total) {
+  return `[RTK-TRUNCATED filter=${filter} omitted=${omitted} total=${total}]`;
+}

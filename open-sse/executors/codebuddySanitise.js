@@ -18,8 +18,13 @@
 export const NEUTRAL_PROMPT =
   "You are a helpful AI assistant that helps with software engineering tasks.";
 
+// Identity markers the CodeBuddy gateways reject. Each alternative must name a
+// specific agent/CLI identity — deliberately NOT a bare "you are an AI agent"
+// (a benign user system prompt can say that) nor lone generic tags. Probed
+// live: the exact sentence "You are Claude Code, Anthropic's official CLI for
+// Claude." is blocked; individual keywords are not.
 export const AGENT_PATTERN =
-  /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i;
+  /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)\b|you are an? (?:powerful )?(?:coding |code )?agent\s+(?:built|made|created|developed|designed) by|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|OhMyOpenCode|<agent-identity>|orchestration capabilities.{0,40}claude/i;
 
 // Flatten string | [{type:"text",text}] | other-typed blocks to plain text.
 export function flattenContent(content) {

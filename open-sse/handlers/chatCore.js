@@ -534,12 +534,15 @@ export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {
 // was exceeded — the resolved contextWindow for that provider/model — to tell a
 // genuinely-oversized request from a mis-advertised model capability.
 const CONTEXT_OVERFLOW_RE =
-  /context.{0,20}(length|window|limit|exceed)|maximum context|too many tokens|token.{0,10}(limit|exceed)|exceeds? the maximum|request too large|input.{0,10}too long/i;
+  /context.{0,20}(length|window|limit|exceed)|maximum context|too many tokens|token.{0,10}(limit|exceed)|exceeds? the maximum|prompt.{0,12}too long|request.{0,12}too (large|long)|(?:request|payload|input|body).{0,8}too (large|long)|input.{0,10}too long|上下文.{0,8}(超过|超限|太长)|(?:长度|token).{0,8}(超过|超限)/i;
 
 export function detectContextOverflow(status, errorText, provider, model) {
   if (status !== 400 && status !== 413 && status !== 422) return null;
   const text = typeof errorText === "string" ? errorText : JSON.stringify(errorText || "");
-  if (!CONTEXT_OVERFLOW_RE.test(text)) return null;
+  // 413 Payload Too Large is overflow by definition; a 400/422 must carry a
+  // matching message (an unrecognized 400 is a different client error).
+  const isOverflow = status === 413 || CONTEXT_OVERFLOW_RE.test(text);
+  if (!isOverflow) return null;
   const caps = getCapabilitiesForModel(provider, model);
   return {
     isContextOverflow: true,

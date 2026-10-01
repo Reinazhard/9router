@@ -1,5 +1,5 @@
 import { DefaultExecutor } from "./default.js";
-import { sanitiseSystemMessage } from "./codebuddySanitise.js";
+import { sanitiseSystemMessage, NEUTRAL_PROMPT } from "./codebuddySanitise.js";
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -24,8 +24,19 @@ export class CodeBuddyExecutor extends DefaultExecutor {
     // and rejects the whole request. Replace agent-identity system prompts with
     // a neutral one, leaving legitimate user system prompts untouched (see
     // codebuddySanitise.js for why this keys on the identity string, NOT length).
+    //
+    // The gateway also requires the FIRST message to be a system prompt
+    // (otherwise 400 11128) and rejects a "developer" role outright — mirror the
+    // Intl executor: drop developer messages and guarantee a leading system
+    // message, so a CN request whose caller sent neither is not rejected.
     if (Array.isArray(transformed.messages)) {
-      transformed.messages = transformed.messages.map(sanitiseSystemMessage);
+      const messages = transformed.messages
+        .filter((m) => m && typeof m === "object" && m.role !== "developer")
+        .map(sanitiseSystemMessage);
+      if (!messages.some((m) => m && m.role === "system")) {
+        messages.unshift({ role: "system", content: NEUTRAL_PROMPT });
+      }
+      transformed.messages = messages;
     }
 
     // CodeBuddy only surfaces model reasoning when the request carries the CLI's

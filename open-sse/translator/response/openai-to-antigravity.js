@@ -54,8 +54,12 @@ export function openaiToAntigravityResponse(chunk, state) {
     if (parts.length === 0 && !finishReason) return null;
   }
 
-  // On finish, emit accumulated tool calls as complete functionCall parts
-  if (finishReason) {
+  // On finish, emit accumulated tool calls as complete functionCall parts.
+  // Guard against a repeated finish_reason chunk re-emitting every tool call
+  // (the accumulator is not cleared between chunks), mirroring the idempotency
+  // the other response translators apply.
+  if (finishReason && !state._toolCallsEmitted) {
+    state._toolCallsEmitted = true;
     const indices = Object.keys(state._toolCallAccum);
     for (const idx of indices) {
       const accum = state._toolCallAccum[idx];
@@ -70,6 +74,8 @@ export function openaiToAntigravityResponse(chunk, state) {
         }
       });
     }
+    // Release the accumulator so a later message cannot reuse stale calls.
+    state._toolCallAccum = {};
   }
 
   // Skip empty non-finish chunks
