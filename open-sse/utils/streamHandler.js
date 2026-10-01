@@ -2,6 +2,13 @@
 import { STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
+// Keepalive cadence: emit an SSE heartbeat after this much upstream silence.
+// Well under a client's ~60–90s idle timeout, and well over a normal
+// inter-token gap, so it only fires during a genuinely quiet phase.
+const KEEPALIVE_INTERVAL_MS = 15000;
+// Unique sentinel returned by the race when the keepalive timer wins.
+const KEEPALIVE_TICK = Symbol("keepalive-tick");
+
 // Get HH:MM:SS timestamp
 function getTimeString() {
   return new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -99,10 +106,21 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
  * @param {function} [onAbortTerminal] - Receives a human-readable abort
  * message and returns terminal SSE bytes to emit downstream.
  */
-export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null) {
+export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null, keepalive = null) {
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
   let terminalEmitted = false;
+
+  // Keepalive: emit a periodic SSE heartbeat while the upstream is silent, so a
+  // long reasoning/prefill phase is distinguishable from a dead stream and the
+  // client's own idle timeout does not fire. `keepalive` = { bytes, intervalMs }
+  // where bytes() returns a Uint8Array (null disables). We race a single shared
+  // pending read against a timer: a winning timer emits one heartbeat and the
+  // SAME pending read is awaited on the next pull (never issuing two concurrent
+  // reader.read() calls, which would split one chunk across two pulls).
+  const keepaliveIntervalMs = keepalive?.intervalMs || KEEPALIVE_INTERVAL_MS;
+  const keepaliveBytes = keepalive?.bytes || null;
+  let pendingRead = null;
 
   // Emit a synthesized terminal payload (e.g. Responses response.failed + [DONE]) once
   const emitTerminal = (controller) => {
@@ -123,8 +141,31 @@ export function createDisconnectAwareStream(transformStream, streamController, o
       }
 
       try {
-        const { done, value } = await reader.read();
+        if (!pendingRead) pendingRead = reader.read();
 
+        let result;
+        if (keepaliveBytes) {
+          // Timer is created per-await and cleared as soon as either side settles,
+          // so there is no dangling timer when the real chunk wins.
+          let timer;
+          result = await Promise.race([
+            pendingRead,
+            new Promise((resolve) => { timer = setTimeout(() => resolve(KEEPALIVE_TICK), keepaliveIntervalMs); }),
+          ]);
+          clearTimeout(timer);
+        } else {
+          result = await pendingRead;
+        }
+
+        if (result === KEEPALIVE_TICK) {
+          // Upstream still silent: emit one heartbeat and keep the pending read.
+          const bytes = keepaliveBytes();
+          if (bytes) controller.enqueue(bytes);
+          return;
+        }
+
+        pendingRead = null; // real result consumed
+        const { done, value } = result;
         if (done) {
           streamController.handleComplete();
           controller.close();
@@ -191,9 +232,19 @@ export function createDisconnectAwareStream(transformStream, streamController, o
  * @param {Response} providerResponse - Response from provider
  * @param {TransformStream} transformStream - Transform stream for SSE
  * @param {object} streamController - Stream controller from createStreamController
+ * @param {function|null} onAbortTerminal - Terminal bytes on abort
+ * @param {number} stallTimeoutMs - Abort after this much upstream silence
+ * @param {object|null} keepalive - { format, provider } to emit SSE keepalives
+ *   during upstream silence. A long reasoning/prefill phase on a forced-stream
+ *   provider (CodeBuddy) can leave the client seeing only a few events and then
+ *   nothing for a minute-plus; without a heartbeat the client's own idle timeout
+ *   fires and it retries non-streaming. Anthropic clients get `event: ping`;
+ *   OpenAI-shaped clients get a harmless comment line. Gemini-family clients
+ *   reject unexpected frames, so they are skipped.
  */
-export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS) {
+export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, keepalive = null) {
   let stallTimer = null;
+  let keepaliveTimer = null;
   let chunkCount = 0;
   let totalBytes = 0;
   let lastChunkAt = Date.now();
@@ -251,10 +302,18 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     .pipeThrough(upstreamTap)
     .pipeThrough(transformStream);
 
+  // Keepalive is built lazily and only when the caller opted in (a format whose
+  // client benefits). Gemini-family clients reject unexpected frames, so the
+  // caller passes keepalive=null for them.
+  const keepaliveOpt = keepalive?.bytes
+    ? { bytes: keepalive.bytes, intervalMs: keepalive.intervalMs || KEEPALIVE_INTERVAL_MS }
+    : null;
+
   return createDisconnectAwareStream(
     { readable: transformedBody, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
     wrappedController,
-    onAbortTerminal ? () => onAbortTerminal(abortMessage) : null
+    onAbortTerminal ? () => onAbortTerminal(abortMessage) : null,
+    keepaliveOpt
   );
 }
 

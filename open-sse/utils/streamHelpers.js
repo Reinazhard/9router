@@ -145,3 +145,24 @@ export function buildStreamErrorBytes(statusCode, message, clientFormat) {
 
   return sharedEncoder.encode(sse);
 }
+
+/**
+ * Build one SSE keepalive frame for the given client format, emitted while the
+ * upstream is silent (long reasoning/prefill) so the client can tell a live
+ * stream from a dead one and does not trip its own idle timeout.
+ *
+ * - Anthropic clients: `event: ping` / `data: {"type":"ping"}` — the protocol's
+ *   own keepalive, which Claude Code emits and accepts.
+ * - Every other SSE client: a comment line (`: keepalive`), which SSE parsers
+ *   ignore by spec.
+ *
+ * Returns encoded bytes, or null when the client format must not receive extra
+ * frames.
+ */
+export function buildKeepaliveBytes(clientFormat) {
+  if (clientFormat === FORMATS.CLAUDE) {
+    return sharedEncoder.encode(formatSSE({ type: "ping" }, FORMATS.CLAUDE));
+  }
+  return sharedEncoder.encode(": keepalive\n\n");
+}
+

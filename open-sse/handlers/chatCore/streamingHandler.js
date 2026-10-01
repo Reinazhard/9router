@@ -5,7 +5,7 @@ import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
-import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
+import { buildStreamErrorBytes, buildKeepaliveBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
@@ -92,7 +92,16 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     ? buildAbortedResponsesTerminalBytes
     : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+
+  // SSE keepalive during upstream silence: a forced-stream provider (CodeBuddy)
+  // can spend a long reasoning/prefill phase with no visible delta; without a
+  // heartbeat the client's own idle timeout fires and it retries non-streaming
+  // (the "body is JSON but not a Message" report). Gemini-family clients reject
+  // unexpected frames, so they get no keepalive.
+  const isGeminiFamily = provider === "antigravity" || provider === "gemini" || provider === "vertex";
+  const keepalive = isGeminiFamily ? null : { bytes: () => buildKeepaliveBytes(sourceFormat) };
+
+  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, keepalive);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
