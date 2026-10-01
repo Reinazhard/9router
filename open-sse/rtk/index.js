@@ -42,7 +42,11 @@ export function compressMessages(body, enabled) {
       }
 
       // Shape 1: OpenAI tool message — { role:"tool", content: "string" }
+      // This is the shape the Claude->OpenAI translator emits (string content),
+      // so the [tool_error: true] marker check MUST live here too — otherwise a
+      // failed tool result gets compressed and its error trace is lost.
       if (msg.role === "tool" && typeof msg.content === "string") {
+        if (msg.content.startsWith("[tool_error: true]")) continue;
         msg.content = compressText(msg.content, stats, "openai-tool");
         continue;
       }

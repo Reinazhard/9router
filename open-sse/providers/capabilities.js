@@ -37,6 +37,21 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import { PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
+
+// Alias -> provider id ("cbai" -> "codebuddy-intl"). Callers reach
+// getCapabilitiesForModel with either the provider id OR the short alias (the
+// dashboard model lists and combo refs are keyed by ALIAS). Without this the
+// provider-specific override table is missed and the generic pattern table
+// wins, silently reintroducing CN/Intl divergence.
+const ALIAS_TO_PROVIDER_ID = Object.fromEntries(
+  Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id]),
+);
+
+function normalizeProviderKey(provider) {
+  if (!provider) return provider;
+  return ALIAS_TO_PROVIDER_ID[provider] || provider;
+}
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -643,8 +658,16 @@ function isCommandCodeTextOnly(model) {
 export function getCapabilitiesForModel(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
 
+  // Accept the provider alias ("cbai") as well as the id ("codebuddy-intl").
+  provider = normalizeProviderKey(provider);
+
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
-  const baseModel = model.includes("/") ? model.split("/").pop() : model;
+  // Also strip a trailing thinking-level suffix ("glm-5.3(high)") — chatCore
+  // re-appends it to the upstream model id, so the translator can hand us a
+  // suffixed id; without stripping, the provider override key misses and the
+  // looser generic pattern (wrong window / maxOutput) wins.
+  let baseModel = model.includes("/") ? model.split("/").pop() : model;
+  baseModel = baseModel.replace(/\([^()]+\)\s*$/, "").trim();
 
   // CommandCode wire is /alpha/generate for every model. Family patterns
   // (deepseek-v4 → thinkingFormat:deepseek, vision:false) must not win here.

@@ -134,7 +134,12 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const reasoningParts = [];
   const toolCallMap = new Map(); // index -> { id, type, function: { name, arguments } }
   const toolIndexById = new Map(); // tool_call id -> assigned index (when provider omits index)
-  let nextSyntheticToolIndex = 0;
+  // Synthetic slots for calls the provider streamed without an index or id are
+  // allocated from a high base so they can never collide with a real provider
+  // index (0,1,2,...). Order is preserved: synthetics sort after real indices,
+  // which matches the streaming position in which they arrived.
+  const SYNTHETIC_INDEX_BASE = 100000;
+  let nextSyntheticToolIndex = SYNTHETIC_INDEX_BASE;
   let lastToolIndex = 0;
   let finishReason = "stop";
   let usage = null;
@@ -163,7 +168,17 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
           idx = nextSyntheticToolIndex++;
           toolIndexById.set(tc.id, idx);
         } else {
-          idx = lastToolIndex;
+          // No index and no id: a fragment that carries a NEW function name is a
+          // distinct call (parallel calls streamed positionally) — allocate a
+          // fresh slot rather than merging it into the previous one. A fragment
+          // with only arguments continues the current slot.
+          const lastSlot = toolCallMap.get(lastToolIndex);
+          const isNewCall = tc.function?.name && lastSlot && lastSlot.function.name && lastSlot.function.name !== tc.function.name;
+          if (isNewCall) {
+            idx = nextSyntheticToolIndex++;
+          } else {
+            idx = lastToolIndex;
+          }
         }
         lastToolIndex = idx;
 
