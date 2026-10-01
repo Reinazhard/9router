@@ -6,6 +6,7 @@ import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { openAICompletionToClaudeMessage } from "./completionToClient.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -396,13 +397,16 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     // A Responses-format client (e.g. Codex) forced this provider to stream,
     // but wants JSON back. parseSSEToOpenAIResponse yields a Chat Completions
-    // body; convert it to the Responses `output` shape so tool_calls are not
-    // lost on the non-streaming return path. Inlined (not imported from
-    // nonStreamingHandler.js) to avoid a circular import: nonStreamingHandler
-    // already imports parseSSEToOpenAIResponse from this module.
-    const finalBody = sourceFormat === FORMATS.OPENAI_RESPONSES
-      ? chatCompletionToResponses(parsed, customToolNames)
-      : parsed;
+    // body; convert it to the shape the CLIENT format expects, or the client
+    // rejects it. A Claude Code non-streaming retry must receive an Anthropic
+    // `Message`, not a `chat.completion` — otherwise it reports "body is JSON
+    // but not a Message". The Responses/Antigravity branches below mirror this.
+    let finalBody = parsed;
+    if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+      finalBody = chatCompletionToResponses(parsed, customToolNames);
+    } else if (sourceFormat === FORMATS.CLAUDE) {
+      finalBody = openAICompletionToClaudeMessage(parsed);
+    }
 
     return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalBody, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
